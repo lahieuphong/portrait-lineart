@@ -4,7 +4,7 @@ import sys
 import subprocess
 
 # chỉnh đường dẫn ảnh đầu vào cho đúng
-INPUT = "data/input/picture_4.png"
+INPUT = "data/input/HoChiMinhCityPostOffice.png"
 
 # output mặc định sẽ là data/output/<basename>.png (nếu bạn muốn tên khác, sửa dòng SAVE_OUT)
 basename = os.path.splitext(os.path.basename(INPUT))[0]
