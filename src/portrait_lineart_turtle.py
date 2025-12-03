@@ -4,14 +4,18 @@ portrait_lineart_turtle.py
 
 Portrait -> line-art, vẽ từng nét bằng turtle.
 
-Chỉ chỉnh để **nét mỏng hơn** (các phần khác giữ nguyên).
+Chỉnh:
+- Nét mảnh hơn.
+- Lưu trực tiếp PNG từ paths bằng PIL (không phụ thuộc PostScript / Ghostscript).
 """
 import argparse
 import math
 import time
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+import os
+import datetime
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageDraw
 import numpy as np
 import turtle
 import sys
@@ -20,7 +24,7 @@ import sys
 CANVAS_W, CANVAS_H = 900, 900
 BG_COLOR = "white"
 LINE_COLOR = "black"
-LINE_WIDTH = 0.6   # <-- GIẢM: mặc định bút mảnh hơn (trước là 0)
+LINE_WIDTH = 0.6   # mặc định bút mảnh hơn
 
 # ---------- Image loading ----------
 def load_image_gray(path: str, max_size=(700,700)) -> Image.Image:
@@ -224,15 +228,74 @@ def _path_curvature_measure(path: List[Tuple[float,float]]) -> float:
         cnt += 1
     return (total / max(1, cnt))
 
+
+def save_paths_to_png(paths, img_w, img_h, out_path,
+                      canvas_w=CANVAS_W, canvas_h=CANVAS_H,
+                      bg_color=BG_COLOR, line_color=LINE_COLOR,
+                      thickness_mode="fixed", min_width=0.3, max_width=1.6,
+                      base_line_width=LINE_WIDTH):
+    """
+    Vẽ lại các đường (paths) lên PIL.Image và lưu PNG trực tiếp.
+    Giữ logic pensize giống draw_paths_turtle (tính theo scale).
+    """
+    # scale mapping (lấy scale từ px_to_turtle)
+    _, _, scale = px_to_turtle(0, 0, img_w, img_h, canvas_w, canvas_h)
+
+    im = Image.new("RGB", (int(canvas_w), int(canvas_h)), bg_color)
+    draw = ImageDraw.Draw(im)
+
+    path_lengths = [len(p) for p in paths] if paths else [1]
+    max_len = max(1, max(path_lengths))
+
+    for path in paths:
+        if not path:
+            continue
+
+        # compute pw (same logic as draw_paths_turtle)
+        if thickness_mode == "fixed":
+            pw = base_line_width
+        elif thickness_mode == "length":
+            L = len(path)
+            t = L / max_len
+            pw = min_width + (max_width - min_width) * (0.1 + 0.9 * t)
+        elif thickness_mode == "curvature":
+            curv = _path_curvature_measure(path)
+            ncurv = min(1.0, curv / math.pi)
+            pw = min_width + (max_width - min_width) * (1.0 - ncurv)
+        else:
+            pw = base_line_width
+
+        # convert to pixel width for PIL (scale factor)
+        pixel_w = max(1, int(round(max(0.15, pw) * scale)))
+
+        # convert points to canvas pixel coords (origin top-left)
+        tpts = [px_to_turtle(x, y, img_w, img_h, canvas_w, canvas_h)[:2] for (x,y) in path]
+        # px_to_turtle returns centered coords with +x right and +y up;
+        # convert to image coords (0,0) top-left
+        coords = [(int(round(tx + canvas_w/2.0)), int(round(canvas_h/2.0 - ty))) for (tx,ty) in tpts]
+
+        if len(coords) >= 2:
+            draw.line(coords, fill=line_color, width=pixel_w)
+
+    outdir = os.path.dirname(out_path)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
+    im.save(out_path, "PNG")
+    print(f"Saved PNG: {out_path}")
+
+
 # ---------- Draw with turtle (fast-friendly + thickness modes) ----------
 def draw_paths_turtle(paths: List[List[Tuple[float,float]]],
                       img_w: int, img_h: int,
                       delay: float = 0.001, update_every: int = 30,
                       batch: int = 20, fast: bool = False,
                       line_width: float = LINE_WIDTH, line_color: str = LINE_COLOR,
-                      thickness_mode: str = "fixed", min_width: float = 0.3, max_width: float = 1.6):
+                      thickness_mode: str = "fixed", min_width: float = 0.3, max_width: float = 1.6,
+                      save_out: Optional[str] = None, keep_open: bool = True):
     """
     NOTE: min_width and max_width defaults reduced to make strokes thinner by default.
+    save_out: when provided -> save PNG to that path (direct PIL rendering).
+    keep_open: if True, call screen.mainloop() at end so window stays open until closed.
     """
     screen = turtle.Screen()
     screen.setup(CANVAS_W, CANVAS_H)
@@ -257,14 +320,14 @@ def draw_paths_turtle(paths: List[List[Tuple[float,float]]],
         elif thickness_mode == "length":
             L = len(path)
             t = L / max_len
-            pw = min_width + (max_width - min_width) * (0.1 + 0.9 * t)  # <-- GIẢM bias từ 0.2->0.1
+            pw = min_width + (max_width - min_width) * (0.1 + 0.9 * t)
         elif thickness_mode == "curvature":
             curv = _path_curvature_measure(path)
             ncurv = min(1.0, curv / math.pi)
             pw = min_width + (max_width - min_width) * (1.0 - ncurv)
         else:
             pw = line_width
-        pen.pensize(max(0.15, pw))  # <-- GIẢM: min pensize từ 0.2 -> 0.15
+        pen.pensize(max(0.15, pw))
 
         # convert to turtle coords
         tpts = [px_to_turtle(x,y,img_w,img_h, CANVAS_W, CANVAS_H)[:2] for (x,y) in path]
@@ -288,8 +351,37 @@ def draw_paths_turtle(paths: List[List[Tuple[float,float]]],
             if (i+1) % 10 == 0:
                 screen.update()
                 time.sleep(delay)
+    # final update
     screen.update()
-    turtle.done()
+
+    # --- save canvas to file if requested (direct PNG via PIL) ---
+    if save_out:
+        try:
+            save_paths_to_png(
+                paths, img_w, img_h, save_out,
+                canvas_w=CANVAS_W, canvas_h=CANVAS_H,
+                bg_color=BG_COLOR, line_color=line_color,
+                thickness_mode=thickness_mode,
+                min_width=min_width, max_width=max_width,
+                base_line_width=line_width
+            )
+        except Exception as e:
+            print("Lỗi khi lưu PNG trực tiếp:", e)
+
+    # leave window open until closed by user (default)
+    if keep_open:
+        try:
+            screen.mainloop()
+        except Exception:
+            try:
+                turtle.done()
+            except Exception:
+                pass
+    else:
+        try:
+            turtle.bye()
+        except Exception:
+            pass
 
 # ---------- Main ----------
 def main():
@@ -310,8 +402,10 @@ def main():
     parser.add_argument('--line_width', type=float, default=LINE_WIDTH, help='Base pen width for drawing.')
     parser.add_argument('--thickness_mode', choices=['fixed','length','curvature'], default='fixed',
                         help='How to vary stroke thickness: fixed/length/curvature.')
-    parser.add_argument('--min_width', type=float, default=0.3, help='Min pen width when using dynamic thickness.')  # default reduced
-    parser.add_argument('--max_width', type=float, default=1.6, help='Max pen width when using dynamic thickness.')  # default reduced
+    parser.add_argument('--min_width', type=float, default=0.3, help='Min pen width when using dynamic thickness.')
+    parser.add_argument('--max_width', type=float, default=1.6, help='Max pen width when using dynamic thickness.')
+    parser.add_argument('--save_out', type=str, default=None, help='Path to save PNG output (e.g. data/output/result.png).')
+    parser.add_argument('--no_keep', action='store_true', help='Do not keep window open after drawing (close immediately).')
     args = parser.parse_args()
 
     img = load_image_gray(args.input, max_size=tuple(args.maxsize))
@@ -339,7 +433,14 @@ def main():
         final_paths.append(sm)
     print("Paths after simplify + smoothing:", len(final_paths))
 
-    print("Drawing with turtle... (window will open)")
+    # prepare save_out default if user didn't provide but wants automatic naming
+    save_out = args.save_out
+    if save_out is None:
+        inp_base = os.path.basename(args.input)
+        name, _ = os.path.splitext(inp_base)
+        save_out = os.path.join("data", "output", f"{name}.png")
+
+    print("Drawing with turtle... (window will open) — saving to:", save_out)
     draw_paths_turtle(final_paths, img.width, img.height,
                       delay=args.delay, update_every=args.update_every,
                       batch=args.batch, fast=args.fast,
@@ -347,7 +448,9 @@ def main():
                       line_color=args.line_color,
                       thickness_mode=args.thickness_mode,
                       min_width=max(0.05, args.min_width),
-                      max_width=max(0.05, args.max_width))
+                      max_width=max(0.05, args.max_width),
+                      save_out=save_out,
+                      keep_open=(not args.no_keep))
 
 if __name__ == '__main__':
     main()
